@@ -66,6 +66,7 @@ namespace LostKingdom
                 FixWalkingColliders();
                 UpgradeForestRoadVisuals();
                 UpgradePoisonMushroomVisuals();
+                ConfigureMysticGate();
                 StartMysticAmbience();
                 return;
             }
@@ -88,7 +89,15 @@ namespace LostKingdom
             FixWalkingColliders();
             UpgradeForestRoadVisuals();
             UpgradePoisonMushroomVisuals();
+            ConfigureMysticGate();
             StartMysticAmbience();
+        }
+
+        static void ConfigureMysticGate()
+        {
+            // Give the double-jump route ample overhead clearance once Level 1's gate opens.
+            var gate = Object.FindAnyObjectByType<MagicalGate>();
+            if (gate) gate.openLiftHeight = 12f;
         }
 
         public static void UpgradePoisonMushroomVisuals()
