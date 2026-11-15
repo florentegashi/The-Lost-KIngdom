@@ -41,7 +41,7 @@ namespace LostKingdom
                 else if (renderer.sharedMaterial == originalLeaves) renderer.sharedMaterial = leaves;
             }
         }
-        void OnDestroy() { Destroy(ground); Destroy(leaves); }
+        void OnDestroy() { if (Application.isPlaying) { Destroy(ground); Destroy(leaves); } }
     }
 }
 
@@ -53,15 +53,31 @@ namespace LostKingdom
     {
         static readonly Dictionary<string, Material> RuntimeMaterials = new Dictionary<string, Material>();
         static Material stone, moss, poison, bark, cloth, leather, skin, hair;
+        static Material forestSoil, forestLitter, wornTrail;
+        const string ForestRoadMaterialName = "Ancient forest road surface";
+        static AudioClip mysticForestAmbience;
         static LightFragment fragmentFour, fragmentFive;
         static readonly float[] Sections = { 100f, 112f, 124f, 139f };
 
         public static void Build()
         {
-            if (GameObject.Find("Mystic Forest ravine")) return;
+            if (GameObject.Find("Mystic Forest ravine"))
+            {
+                FixWalkingColliders();
+                UpgradeForestRoadVisuals();
+                UpgradePoisonMushroomVisuals();
+                StartMysticAmbience();
+                return;
+            }
             stone = Material("Ancient stone", new Color(.25f, .32f, .34f));
             moss = Material("Moss green", new Color(.12f, .27f, .18f));
-            poison = Material("Poisonous bloom", new Color(.25f, .62f, .22f), new Color(.12f, .5f, .14f));
+            forestSoil = Material("Forest soil variation", new Color(.16f, .13f, .09f));
+            forestLitter = Material("Soft moss ground", new Color(.13f, .205f, .12f));
+            wornTrail = Material("Worn forest earth", new Color(.27f, .22f, .15f));
+            ApplyMottledTexture(forestSoil, new Color(.16f, .13f, .09f), 41);
+            ApplyMottledTexture(forestLitter, new Color(.13f, .205f, .12f), 83);
+            // The legacy ribbon remains in the scene for its route shape, but its renderer is hidden.
+            poison = PinkPoisonMaterial();
             bark = Material("Adventurer leather", new Color(.2f, .11f, .075f));
             cloth = Material("Adventurer teal", new Color(.1f, .32f, .34f));
             leather = Material("Boot leather", new Color(.1f, .07f, .05f));
@@ -69,6 +85,526 @@ namespace LostKingdom
             hair = Material("Adventurer hair", new Color(.095f, .052f, .035f));
             BuildTerrain(); BuildRoute(); BuildShrineClimb(); BuildPoisonMushrooms(); BuildAdventurer(); BuildFloorDetails();
             BuildVisualDressing(); BuildKeyObjectVisuals(); BuildAtmosphere();
+            FixWalkingColliders();
+            UpgradeForestRoadVisuals();
+            UpgradePoisonMushroomVisuals();
+            StartMysticAmbience();
+        }
+
+        public static void UpgradePoisonMushroomVisuals()
+        {
+            poison = PinkPoisonMaterial();
+            if (!skin) skin = Material("Warm skin", new Color(.68f, .44f, .3f));
+            AddAdditionalPoisonMushrooms();
+            foreach (var mushroom in Object.FindObjectsByType<PoisonMushroom>(FindObjectsInactive.Include))
+            {
+                foreach (var renderer in mushroom.GetComponentsInChildren<Renderer>(true))
+                    if (renderer.gameObject.name.IndexOf("cap", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                        renderer.sharedMaterial = poison;
+
+                if (!mushroom.transform.Find("Pink mushroom glow"))
+                {
+                    var glow = new GameObject("Pink mushroom glow"); glow.transform.SetParent(mushroom.transform, false);
+                    glow.transform.localPosition = Vector3.up * .62f;
+                    var light = glow.AddComponent<Light>(); light.type = LightType.Point;
+                    light.color = new Color(1f, .12f, .46f); light.intensity = .8f; light.range = 2.7f;
+                    light.shadows = LightShadows.None;
+                }
+            }
+        }
+
+        public static bool NeedsPoisonMushroomVisualUpgrade()
+        {
+            for (int i = 1; i <= 6; i++)
+                if (!GameObject.Find("Forest poison patch " + i.ToString("00"))) return true;
+            foreach (var mushroom in Object.FindObjectsByType<PoisonMushroom>(FindObjectsInactive.Include))
+            {
+                if (!mushroom.transform.Find("Pink mushroom glow")) return true;
+                foreach (var renderer in mushroom.GetComponentsInChildren<Renderer>(true))
+                {
+                    if (renderer.gameObject.name.IndexOf("cap", System.StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    var material = renderer.sharedMaterial;
+                    if (!material || material.name != "Poisonous bloom") return true;
+                    Color color = material.HasProperty("_BaseColor") ? material.GetColor("_BaseColor") : material.color;
+                    if (color.r < .8f || color.g > .3f || !material.IsKeywordEnabled("_EMISSION")) return true;
+                }
+            }
+            return false;
+        }
+
+        static void AddAdditionalPoisonMushrooms()
+        {
+            float[] zPositions = { 9f, 24f, 43f, 62f, 81f, 92f };
+            for (int i = 0; i < zPositions.Length; i++)
+            {
+                string name = "Forest poison patch " + (i + 1).ToString("00");
+                if (GameObject.Find(name)) continue;
+                float z = zPositions[i];
+                float side = i % 2 == 0 ? -1f : 1f;
+                float x = TrailX(z) + side * 7.6f;
+                var cluster = CreatePoisonCluster(new Vector3(x, .01f, z));
+                cluster.name = name;
+            }
+        }
+
+        static void StartMysticAmbience()
+        {
+            if (!Application.isPlaying || GameObject.Find("Mystic Forest eerie ambience")) return;
+            if (!mysticForestAmbience)
+            {
+                const int sampleRate = 22050, seconds = 12;
+                int sampleCount = sampleRate * seconds;
+                var samples = new float[sampleCount * 2];
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    float t = i / (float)sampleRate;
+                    // A long breath-like rise and fall, with a quicker tremble underneath,
+                    // keeps the loop eerie and changing instead of sounding like a static hum.
+                    float breath = .5f + .5f * Mathf.Sin(2f * Mathf.PI * t / seconds - Mathf.PI * .5f);
+                    float swell = .12f + .88f * Mathf.Pow(breath, 1.7f);
+                    float tremble = .82f + .18f * (.5f + .5f * Mathf.Sin(2f * Mathf.PI * t / 3f));
+                    float pitchWaver = 1f + .035f * Mathf.Sin(2f * Mathf.PI * t / 5f);
+                    float drone = Mathf.Sin(2f * Mathf.PI * 35f * pitchWaver * t) * .3f
+                        + Mathf.Sin(2f * Mathf.PI * 36.7f * pitchWaver * t) * .23f
+                        + Mathf.Sin(2f * Mathf.PI * 52f * pitchWaver * t) * .15f
+                        + Mathf.Sin(2f * Mathf.PI * 67f * pitchWaver * t) * .1f;
+                    float ghost = Mathf.Sin(2f * Mathf.PI * (190f + 18f * Mathf.Sin(2f * Mathf.PI * t / 7f)) * t) * .026f
+                        + Mathf.Sin(2f * Mathf.PI * (283f + 27f * Mathf.Sin(2f * Mathf.PI * t / 9f + 1f)) * t) * .018f;
+                    float wind = Mathf.Sin(2f * Mathf.PI * 83f * t + .7f) * .035f
+                        + Mathf.Sin(2f * Mathf.PI * 127f * t + 1.8f) * .027f
+                        + Mathf.Sin(2f * Mathf.PI * 173f * t + 2.4f) * .021f
+                        + Mathf.Sin(2f * Mathf.PI * 229f * t + .2f) * .016f
+                        + Mathf.Sin(2f * Mathf.PI * 293f * t + 1.1f) * .012f
+                        + Mathf.Sin(2f * Mathf.PI * 367f * t + 2.9f) * .009f;
+                    float pulse = Mathf.Sin(2f * Mathf.PI * 2f * t) * .025f;
+                    float value = (drone + wind + pulse + ghost) * swell * tremble;
+                    samples[i * 2] = value;
+                    samples[i * 2 + 1] = value * .96f + Mathf.Sin(2f * Mathf.PI * 173f * t + .5f) * .004f;
+                }
+                mysticForestAmbience = AudioClip.Create("Mystic Forest eerie ambience", sampleCount, 2, sampleRate, false);
+                mysticForestAmbience.SetData(samples, 0);
+            }
+            var sourceObject = new GameObject("Mystic Forest eerie ambience");
+            var source = sourceObject.AddComponent<AudioSource>();
+            source.clip = mysticForestAmbience; source.loop = true; source.playOnAwake = false;
+            source.spatialBlend = 0; source.volume = .52f; source.priority = 48;
+            sourceObject.AddComponent<MysticForestAmbienceDistance>();
+            source.Play();
+        }
+
+        static Material PinkPoisonMaterial()
+        {
+            var material = Material("Poisonous bloom", new Color(1f, .12f, .48f), new Color(2.4f, .12f, .72f));
+            material.color = new Color(1f, .12f, .48f);
+            if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", new Color(1f, .12f, .48f));
+            material.EnableKeyword("_EMISSION");
+            if (material.HasProperty("_EmissionColor")) material.SetColor("_EmissionColor", new Color(2.4f, .12f, .72f));
+            return material;
+        }
+
+        public static bool NeedsRoadVisualUpgrade()
+        {
+            var ground = GameObject.Find("Forest entrance ground natural surface");
+            if (!ground) return false;
+            var renderer = ground.GetComponent<MeshRenderer>();
+            var filter = ground.GetComponent<MeshFilter>();
+            var road = GameObject.Find("Continuous winding forest path");
+            var roadRenderer = road ? road.GetComponent<Renderer>() : null;
+            return !renderer || !filter || !filter.sharedMesh || filter.sharedMesh.subMeshCount != 1 ||
+                !renderer.sharedMaterial || renderer.sharedMaterial.name != ForestRoadMaterialName ||
+                !renderer.sharedMaterial.GetTexture("_BaseMap") || !renderer.sharedMaterial.GetTexture("_BumpMap") ||
+                (roadRenderer && roadRenderer.enabled);
+        }
+
+        public static void UpgradeForestRoadVisuals()
+        {
+            var ground = GameObject.Find("Forest entrance ground natural surface");
+            if (!ground) return;
+            var filter = ground.GetComponent<MeshFilter>();
+            var renderer = ground.GetComponent<MeshRenderer>();
+            if (!filter || !filter.sharedMesh || !renderer) return;
+
+            var roadMaterial = CreateForestRoadMaterial();
+            if (filter.sharedMesh.subMeshCount != 1 || filter.sharedMesh.uv.Length != filter.sharedMesh.vertexCount)
+            {
+                var mesh = Object.Instantiate(filter.sharedMesh);
+                mesh.name = "Forest entrance seamless road and verge mesh";
+                var triangles = new List<int>();
+                for (int submesh = 0; submesh < mesh.subMeshCount; submesh++) triangles.AddRange(mesh.GetTriangles(submesh));
+                mesh.subMeshCount = 1;
+                mesh.SetTriangles(triangles, 0, true);
+                var vertices = mesh.vertices;
+                var uv = new Vector2[vertices.Length];
+                var bounds = mesh.bounds;
+                float width = Mathf.Max(.001f, bounds.size.x), depth = Mathf.Max(.001f, bounds.size.z);
+                for (int i = 0; i < vertices.Length; i++)
+                    uv[i] = new Vector2((vertices[i].x - bounds.min.x) / width, (vertices[i].z - bounds.min.z) / depth);
+                mesh.uv = uv;
+                mesh.RecalculateTangents(); mesh.RecalculateBounds();
+                filter.sharedMesh = mesh;
+            }
+            renderer.sharedMaterial = roadMaterial;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = true;
+
+            var path = GameObject.Find("Continuous winding forest path");
+            if (path && path.TryGetComponent<Renderer>(out var pathRenderer)) pathRenderer.enabled = false;
+            BuildTrailEdgeRoots();
+        }
+
+        static void BuildTrailEdgeRoots()
+        {
+            if (GameObject.Find("Forest trail edge roots")) return;
+            var details = new GameObject("Forest trail edge roots").transform;
+            var bark = Material("Rootwood detail", new Color(.16f, .095f, .065f));
+            Random.InitState(63917);
+            for (int i = 0; i < 18; i++)
+            {
+                float z = Random.Range(4.5f, 92f);
+                float center = TrailX(z) + (Mathf.PerlinNoise(z * .035f, 31f) - .5f) * .9f;
+                float halfWidth = 3.15f + Mathf.PerlinNoise(z * .09f, 17f) * .85f;
+                float side = i % 2 == 0 ? -1f : 1f;
+                float run = Random.Range(.55f, 1.15f);
+                Vector3 start = new Vector3(center + side * (halfWidth - Random.Range(.55f, .95f)), .03f, z - run * .5f);
+                Vector3 end = new Vector3(center + side * (halfWidth + .12f), .024f, z + run * .5f);
+                CreateTaperedSegment("Low exposed trail root", details, start, end, Random.Range(.022f, .034f), .012f, bark, 5);
+            }
+            CombineVisualMeshes(details);
+        }
+
+        static Material CreateForestRoadMaterial()
+        {
+            var material = Material(ForestRoadMaterialName, Color.white);
+            if (!material.GetTexture("_BaseMap") || !material.GetTexture("_BumpMap") || !material.GetTexture("_OcclusionMap"))
+                GenerateForestRoadTextures(material);
+            return material;
+        }
+
+        static void GenerateForestRoadTextures(Material material)
+        {
+            const int width = 1024, height = 1216;
+            var albedo = new Texture2D(width, height, TextureFormat.RGBA32, true, false)
+            { name = "Forest road soil leaves and moss albedo", wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Trilinear, anisoLevel = 8 };
+            var normal = new Texture2D(width, height, TextureFormat.RGBA32, true, true)
+            { name = "Forest road soil normal detail", wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Trilinear, anisoLevel = 8 };
+            var occlusion = new Texture2D(width, height, TextureFormat.RGBA32, true, true)
+            { name = "Forest road contact variation", wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Trilinear, anisoLevel = 8 };
+            var colors = new Color[width * height];
+            var heights = new float[width * height];
+            var aoPixels = new Color[width * height];
+            const float left = -50f, near = -20f, worldWidth = 100f, worldDepth = 118f;
+            for (int py = 0; py < height; py++)
+            {
+                float v = py / (float)(height - 1);
+                float z = near + v * worldDepth;
+                float roadCenter = TrailX(z) + (Mathf.PerlinNoise(z * .035f, 31f) - .5f) * .9f;
+                float roadHalfWidth = 3.15f + Mathf.PerlinNoise(z * .09f, 17f) * .85f;
+                float startFade = Mathf.SmoothStep(0, 1, Mathf.InverseLerp(-1.4f, .8f, z));
+                float endFade = 1f - Mathf.SmoothStep(0, 1, Mathf.InverseLerp(95.7f, 97f, z));
+                for (int px = 0; px < width; px++)
+                {
+                    float u = px / (float)(width - 1);
+                    float x = left + u * worldWidth;
+                    float broad = Mathf.PerlinNoise(x * .105f + 19.2f, z * .105f + 7.4f);
+                    float patches = Mathf.PerlinNoise(x * .37f + 41.6f, z * .37f + 13.1f);
+                    float grain = Mathf.PerlinNoise(x * 2.8f + 7.3f, z * 2.8f + 57.1f);
+                    float grit = Mathf.PerlinNoise(x * 12.5f + 83.2f, z * 12.5f + 29.7f);
+                    float edgeWarp = (Mathf.PerlinNoise(x * .48f + 3.2f, z * .48f + 77.7f) - .5f) * .82f;
+                    float signedEdge = Mathf.Abs(x - roadCenter) + edgeWarp - roadHalfWidth;
+                    float roadMask = (1f - Mathf.SmoothStep(0, 1, Mathf.InverseLerp(-.55f, .58f, signedEdge))) * startFade * endFade;
+                    float vergeMoss = Mathf.SmoothStep(.66f, .88f, patches) * Mathf.SmoothStep(-1.4f, -.1f, -Mathf.Abs(signedEdge - .8f));
+                    float floorMoss = Mathf.SmoothStep(.75f, .92f, broad) * .52f;
+                    float mossMask = Mathf.Clamp01(Mathf.Max(vergeMoss * .72f, floorMoss));
+                    float shade = Mathf.Clamp(.70f + broad * .27f + (patches - .5f) * .22f + (grain - .5f) * .13f, .48f, 1.12f);
+                    Color forestFloor = Color.Lerp(new Color(.105f, .155f, .078f), new Color(.075f, .145f, .07f), mossMask) * shade;
+                    Color soil = new Color(.205f, .125f, .074f) * Mathf.Clamp(.74f + broad * .30f + (patches - .5f) * .25f + (grain - .5f) * .19f, .48f, 1.22f);
+                    float pebbleMask = Mathf.SmoothStep(.76f, .91f, grit) * Mathf.SmoothStep(.48f, .69f, grain) * roadMask * .42f;
+                    float leafMask = Mathf.SmoothStep(.82f, .94f, patches) * Mathf.SmoothStep(.65f, .91f, grit) * roadMask * .52f;
+                    float roadMoss = Mathf.SmoothStep(.77f, .92f, broad) * roadMask * .26f;
+                    soil = Color.Lerp(soil, new Color(.25f, .235f, .19f) * shade, pebbleMask);
+                    soil = Color.Lerp(soil, new Color(.31f, .205f, .095f) * shade, leafMask);
+                    soil = Color.Lerp(soil, new Color(.105f, .17f, .085f) * shade, roadMoss);
+                    Color color = Color.Lerp(forestFloor, soil, roadMask);
+                    float wet = Mathf.Clamp01((.43f - broad) * .8f + (mossMask + roadMoss) * .3f);
+                    int index = py * width + px;
+                    colors[index] = new Color(color.r, color.g, color.b, Mathf.Lerp(.13f, .78f, wet));
+                    heights[index] = (broad - .5f) * .025f + (grain - .5f) * .012f + pebbleMask * .012f + mossMask * .004f;
+                    aoPixels[index] = new Color(Mathf.Clamp01(.60f + patches * .24f + grit * .12f), 0, 0, 1);
+                }
+            }
+            var normalPixels = new Color[width * height];
+            const float normalStrength = 7.5f;
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                {
+                    int index = y * width + x;
+                    float dx = heights[y * width + Mathf.Min(width - 1, x + 1)] - heights[y * width + Mathf.Max(0, x - 1)];
+                    float dz = heights[Mathf.Min(height - 1, y + 1) * width + x] - heights[Mathf.Max(0, y - 1) * width + x];
+                    Vector3 n = new Vector3(-dx * normalStrength, -dz * normalStrength, 1).normalized;
+                    normalPixels[index] = new Color(n.x * .5f + .5f, n.y * .5f + .5f, n.z, 1);
+                }
+            albedo.SetPixels(colors); albedo.Apply(true, true);
+            normal.SetPixels(normalPixels); normal.Apply(true, true);
+            occlusion.SetPixels(aoPixels); occlusion.Apply(true, true);
+            string baseMap = material.HasProperty("_BaseMap") ? "_BaseMap" : "_MainTex";
+            material.SetTexture(baseMap, albedo);
+            if (material.HasProperty("_BumpMap")) material.SetTexture("_BumpMap", normal);
+            if (material.HasProperty("_OcclusionMap")) material.SetTexture("_OcclusionMap", occlusion);
+            material.color = Color.white;
+            if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", Color.white);
+            if (material.HasProperty("_Smoothness")) material.SetFloat("_Smoothness", .38f);
+            if (material.HasProperty("_SmoothnessTextureChannel")) material.SetFloat("_SmoothnessTextureChannel", 1);
+            if (material.HasProperty("_BumpScale")) material.SetFloat("_BumpScale", .62f);
+            if (material.HasProperty("_OcclusionStrength")) material.SetFloat("_OcclusionStrength", .42f);
+            if (material.HasProperty("_Metallic")) material.SetFloat("_Metallic", 0);
+            material.EnableKeyword("_NORMALMAP"); material.EnableKeyword("_OCCLUSIONMAP");
+        }
+
+        // The baked trail is visual only. One continuous entrance floor collider provides
+        // collision support, so the original tile colliders must not remain underneath it.
+        public static void FixWalkingColliders()
+        {
+            var floor = GameObject.Find("Forest entrance ground");
+            if (floor)
+            {
+                var box = floor.GetComponent<BoxCollider>();
+                if (box) box.enabled = true;
+            }
+
+            foreach (var collider in Object.FindObjectsByType<Collider>(FindObjectsInactive.Include))
+                if (collider.gameObject.name == "Lantern trail") collider.enabled = false;
+
+            // Keep the generated path render surface nearly flush with the floor collider.
+            var path = GameObject.Find("Continuous winding forest path");
+            var pathFilter = path ? path.GetComponent<MeshFilter>() : null;
+            if (pathFilter && pathFilter.sharedMesh && pathFilter.sharedMesh.bounds.center.y > .02f)
+            {
+                var flushMesh = Object.Instantiate(pathFilter.sharedMesh);
+                var vertices = flushMesh.vertices;
+                for (int i = 0; i < vertices.Length; i++) vertices[i].y = .012f;
+                flushMesh.vertices = vertices; flushMesh.RecalculateBounds();
+                flushMesh.name = "Winding forest path mesh";
+                pathFilter.sharedMesh = flushMesh;
+            }
+
+            ConfigureShrinePlatformPositions();
+
+            // At a 10 m/s run, a 1.6 m jump under -24 m/s² has about 7.3 m of
+            // same-height air travel. The longest ordinary transfer is under 6 m;
+            // the final shrine transfer is kept as the intended double jump.
+            foreach (var meshCollider in Object.FindObjectsByType<MeshCollider>(FindObjectsInactive.Include))
+            {
+                string name = meshCollider.gameObject.name;
+                if (name != "Ravine climbing ledge" && name != "Gate approach ledge" &&
+                    name != "Shrine ascent ledge" && name != "Double jump cliff shelf" && name != "Mushroom shelf") continue;
+                ConfigureFloatingPlatform(meshCollider);
+            }
+
+            // Already-repaired boxes are refreshed too, so repeated startup calls stay idempotent.
+            foreach (var platform in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include))
+                if (IsFloatingPlatform(platform.name)) ConfigureFloatingPlatform(platform.gameObject);
+        }
+
+        static bool IsFloatingPlatform(string name) => name == "Ravine climbing ledge" || name == "Gate approach ledge"
+            || name == "Shrine ascent ledge" || name == "Double jump cliff shelf" || name == "Mushroom shelf";
+
+        public static bool NeedsFloatingPlatformUpgrade()
+        {
+            bool found = false;
+            foreach (var transform in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include))
+            {
+                if (!IsFloatingPlatform(transform.name)) continue;
+                found = true;
+                var filter = transform.GetComponent<MeshFilter>();
+                var meshCollider = transform.GetComponent<MeshCollider>();
+                var box = transform.GetComponent<BoxCollider>();
+                if (!filter || !filter.sharedMesh || !filter.sharedMesh.name.Contains("flat floating island") ||
+                    (meshCollider && meshCollider.enabled) || !box || !transform.Find("Mystic platform rim glow") ||
+                    !transform.Find("Floating island motes") || !transform.Find("Floating island vegetation")) return true;
+                Vector2 size = FloatingPlatformSize(transform.gameObject);
+                if (Mathf.Abs(box.center.y + .06f) > .005f || Mathf.Abs(box.size.y - .12f) > .005f ||
+                    Mathf.Abs(box.size.x - size.x) > .01f || Mathf.Abs(box.size.z - size.y) > .01f) return true;
+            }
+            if (!found) return false;
+            var shrine = new List<Transform>();
+            foreach (var transform in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include))
+                if (transform.name == "Shrine ascent ledge" || transform.name == "Double jump cliff shelf") shrine.Add(transform);
+            shrine.Sort((a, b) => a.position.z.CompareTo(b.position.z));
+            float[] expectedZ = { 165.4f, 168.4f, 171.4f, 174.4f, 179f };
+            for (int i = 0; i < Mathf.Min(shrine.Count, expectedZ.Length); i++)
+                if (Mathf.Abs(shrine[i].position.z - expectedZ[i]) > .01f) return true;
+            return false;
+        }
+
+        static void ConfigureShrinePlatformPositions()
+        {
+            var platforms = new List<Transform>();
+            foreach (var transform in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include))
+                if (transform.name == "Shrine ascent ledge" || transform.name == "Double jump cliff shelf") platforms.Add(transform);
+            platforms.Sort((a, b) => a.position.z.CompareTo(b.position.z));
+            float[] x = { .4f, -1.1f, 1.2f, -1.35f, 4.4f };
+            float[] y = { 4.2f, 4.82f, 5.44f, 6.06f, 6.9f };
+            float[] z = { 165.4f, 168.4f, 171.4f, 174.4f, 179f };
+            for (int i = 0; i < Mathf.Min(platforms.Count, z.Length); i++)
+                platforms[i].position = new Vector3(x[i], y[i], z[i]);
+        }
+
+        static Vector2 FloatingPlatformSize(GameObject platform)
+        {
+            string name = platform.name;
+            float z = platform.transform.position.z;
+            if (name == "Mushroom shelf") return new Vector2(2f, 2f);
+            if (name == "Gate approach ledge") return new Vector2(3.2f, 3.1f);
+            if (name == "Double jump cliff shelf") return new Vector2(3.3f, 3.3f);
+            if (name == "Shrine ascent ledge") return new Vector2(3.45f, 2.7f);
+            if (z < 124f) return new Vector2(3.15f, 3.3f);
+            if (z < 139f) return new Vector2(3.35f, 3.2f);
+            return new Vector2(3.3f, 3.3f);
+        }
+
+        static void ConfigureFloatingPlatform(MeshCollider meshCollider)
+        {
+            var platform = meshCollider.gameObject;
+            var filter = platform.GetComponent<MeshFilter>();
+            var renderer = platform.GetComponent<MeshRenderer>();
+            if (!filter || !renderer || !meshCollider.sharedMesh) return;
+
+            Vector2 size = FloatingPlatformSize(platform);
+            // Rebuild old faceted landings as beveled rectangular islands with a broad, truly flat top.
+            if (!filter.sharedMesh.name.Contains("flat floating island"))
+            {
+                var island = CreateFloatingIslandMesh(size.x, size.y);
+                island.name = platform.name + " flat floating island";
+                filter.sharedMesh = island;
+                var mossSurface = platform.transform.Find("Flat moss landing surface");
+                if (mossSurface)
+                {
+                    var top = mossSurface.GetComponent<MeshFilter>();
+                    if (top) top.sharedMesh = CreateFloatingIslandTopMesh(size.x, size.y);
+                }
+            }
+
+            var box = platform.GetComponent<BoxCollider>();
+            if (!box) box = platform.AddComponent<BoxCollider>();
+            box.center = new Vector3(0, -.06f, 0);
+            box.size = new Vector3(size.x, .12f, size.y);
+            meshCollider.enabled = false;
+            DestroyGenerated(meshCollider);
+            AddFloatingPlatformVisuals(platform.transform, size);
+        }
+
+        static void ConfigureFloatingPlatform(GameObject platform)
+        {
+            var filter = platform.GetComponent<MeshFilter>();
+            var renderer = platform.GetComponent<MeshRenderer>();
+            if (!filter || !renderer) return;
+            Vector2 size = FloatingPlatformSize(platform);
+            if (!filter.sharedMesh || !filter.sharedMesh.name.Contains("flat floating island"))
+            {
+                filter.sharedMesh = CreateFloatingIslandMesh(size.x, size.y);
+                filter.sharedMesh.name = platform.name + " flat floating island";
+                var top = platform.transform.Find("Flat moss landing surface")?.GetComponent<MeshFilter>();
+                if (top) top.sharedMesh = CreateFloatingIslandTopMesh(size.x, size.y);
+            }
+            var box = platform.GetComponent<BoxCollider>();
+            if (!box) box = platform.AddComponent<BoxCollider>();
+            box.center = new Vector3(0, -.06f, 0);
+            box.size = new Vector3(size.x, .12f, size.y);
+            AddFloatingPlatformVisuals(platform.transform, size);
+        }
+
+        static Mesh CreateFloatingIslandMesh(float width, float depth)
+        {
+            const int sides = 8;
+            var vertices = new Vector3[sides * 2 + 2];
+            var triangles = new int[sides * 12];
+            float corner = Mathf.Min(.06f, Mathf.Min(width, depth) * .025f);
+            Vector2[] top = RoundedRectangle(width, depth, corner);
+            Vector2[] baseRing = RoundedRectangle(width * 1.08f, depth * 1.08f, corner * 1.25f);
+            for (int i = 0; i < sides; i++)
+            {
+                vertices[i] = new Vector3(top[i].x, 0, top[i].y);
+                vertices[sides + i] = new Vector3(baseRing[i].x, -.9f, baseRing[i].y);
+            }
+            vertices[sides * 2] = Vector3.zero;
+            vertices[sides * 2 + 1] = new Vector3(0, -.9f, 0);
+            int ti = 0;
+            for (int i = 0; i < sides; i++)
+            {
+                int next = (i + 1) % sides;
+                triangles[ti++] = sides * 2; triangles[ti++] = next; triangles[ti++] = i;
+                triangles[ti++] = i; triangles[ti++] = next; triangles[ti++] = sides + i;
+                triangles[ti++] = next; triangles[ti++] = sides + next; triangles[ti++] = sides + i;
+                triangles[ti++] = sides * 2 + 1; triangles[ti++] = sides + i; triangles[ti++] = sides + next;
+            }
+            var mesh = new Mesh { name = "flat floating island" };
+            mesh.vertices = vertices; mesh.triangles = triangles; mesh.RecalculateNormals(); mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        static Mesh CreateFloatingIslandTopMesh(float width, float depth)
+        {
+            const int sides = 8;
+            Vector2[] outline = RoundedRectangle(width - .035f, depth - .035f, Mathf.Min(.06f, Mathf.Min(width, depth) * .025f));
+            var vertices = new Vector3[sides + 1]; var triangles = new int[sides * 3];
+            vertices[sides] = new Vector3(0, .008f, 0);
+            for (int i = 0; i < sides; i++)
+            {
+                vertices[i] = new Vector3(outline[i].x, .008f, outline[i].y);
+                triangles[i * 3] = sides; triangles[i * 3 + 1] = (i + 1) % sides; triangles[i * 3 + 2] = i;
+            }
+            var mesh = new Mesh { name = "Flat moss landing surface mesh" };
+            mesh.vertices = vertices; mesh.triangles = triangles; mesh.RecalculateNormals(); mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        static Vector2[] RoundedRectangle(float width, float depth, float corner)
+        {
+            float x = width * .5f, z = depth * .5f;
+            return new[] { new Vector2(-x + corner, -z), new Vector2(x - corner, -z),
+                new Vector2(x, -z + corner), new Vector2(x, z - corner), new Vector2(x - corner, z),
+                new Vector2(-x + corner, z), new Vector2(-x, z - corner), new Vector2(-x, -z + corner) };
+        }
+
+        static void AddFloatingPlatformVisuals(Transform platform, Vector2 size)
+        {
+            if (!platform.Find("Mystic platform rim glow"))
+            {
+                var rim = new GameObject("Mystic platform rim glow"); rim.transform.SetParent(platform, false);
+                var line = rim.AddComponent<LineRenderer>(); line.useWorldSpace = false; line.loop = true; line.positionCount = 8;
+                float corner = Mathf.Min(.06f, Mathf.Min(size.x, size.y) * .025f);
+                var points = RoundedRectangle(size.x - .04f, size.y - .04f, corner);
+                for (int i = 0; i < points.Length; i++) line.SetPosition(i, new Vector3(points[i].x, -.025f, points[i].y));
+                line.widthMultiplier = .025f; line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                var glow = Material("Floating platform edge glow", new Color(.24f, .66f, .58f), new Color(.08f, .48f, .39f));
+                line.sharedMaterial = glow;
+            }
+            if (!platform.Find("Floating island motes"))
+            {
+                var particlesObject = new GameObject("Floating island motes"); particlesObject.transform.SetParent(platform, false);
+                particlesObject.transform.localPosition = new Vector3(0, -.08f, 0);
+                var particles = particlesObject.AddComponent<ParticleSystem>();
+                var main = particles.main; main.loop = true; main.startLifetime = new ParticleSystem.MinMaxCurve(1.4f, 2.6f);
+                main.startSpeed = new ParticleSystem.MinMaxCurve(.025f, .08f); main.startSize = new ParticleSystem.MinMaxCurve(.018f, .035f);
+                main.startColor = new Color(.44f, .9f, .75f, .72f); main.maxParticles = 12;
+                var emission = particles.emission; emission.rateOverTime = .55f;
+                var shape = particles.shape; shape.shapeType = ParticleSystemShapeType.Box;
+                shape.scale = new Vector3(size.x * .92f, .08f, size.y * .92f);
+                var particleRenderer = particlesObject.GetComponent<ParticleSystemRenderer>();
+                var spark = Resources.Load<Material>("LostKingdomSpark"); if (spark) particleRenderer.sharedMaterial = spark;
+                particleRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; particles.Play();
+            }
+            if (!platform.Find("Floating island vegetation"))
+            {
+                var vegetation = new GameObject("Floating island vegetation").transform;
+                vegetation.SetParent(platform, false);
+                var green = Material("Fern jade", new Color(.09f, .31f, .21f));
+                float x = size.x * .52f, z = size.y * .52f;
+                CreateFern(new Vector3(platform.position.x - x, platform.position.y - .18f, platform.position.z - z), .38f, green, vegetation);
+                CreateFern(new Vector3(platform.position.x + x, platform.position.y - .18f, platform.position.z + z), .38f, green, vegetation);
+                CreateFern(new Vector3(platform.position.x + x, platform.position.y - .18f, platform.position.z - z), .34f, green, vegetation);
+                CreateFern(new Vector3(platform.position.x - x, platform.position.y - .18f, platform.position.z + z), .34f, green, vegetation);
+            }
         }
 
         // The following additions are visual-only: every generated object has no collider
@@ -83,27 +619,7 @@ namespace LostKingdom
             var waterGlow = Material("Waterfall glow", new Color(.09f, .36f, .48f), new Color(.04f, .28f, .42f));
             var silhouette = Material("Distant silhouette", new Color(.035f, .075f, .12f));
             Random.InitState(49271);
-
-            foreach (var tree in Object.FindObjectsByType<Transform>())
-            {
-                if (tree.name != "Low-poly pine" || tree.position.z >= 98 && tree.position.z < 182) continue;
-                var detail = new GameObject("Root and branch detail").transform; detail.SetParent(tree, false);
-                for (int i = 0; i < 4; i++)
-                {
-                    float a = i * Mathf.PI * .5f + Random.Range(-.18f, .18f);
-                    Vector3 end = new Vector3(Mathf.Cos(a) * Random.Range(1.15f, 1.7f), -.04f, Mathf.Sin(a) * Random.Range(1.15f, 1.7f));
-                    CreateTaperedSegment("Twisted exposed root", detail, new Vector3(0, .26f, 0), end, .26f, .055f, rootBark, 6);
-                }
-                // A few visible bark limbs break up the simple crown silhouette.
-                for (int i = 0; i < 2; i++)
-                {
-                    float a = Random.Range(0f, Mathf.PI * 2f);
-                    Vector3 start = new Vector3(0, Random.Range(2.1f, 2.8f), 0);
-                    Vector3 end = start + new Vector3(Mathf.Cos(a) * 1.55f, .65f, Mathf.Sin(a) * 1.55f);
-                    CreateTaperedSegment("Gnarled pine bough", detail, start, end, .14f, .055f, rootBark, 5);
-                }
-                CombineVisualMeshes(detail);
-            }
+            BuildTreeVisuals(rootBark, fernGreen, fernLight);
 
             // Low ferns and moonflowers form loose groups along the forest floor and path edge.
             for (int i = 0; i < 145; i++)
@@ -131,6 +647,56 @@ namespace LostKingdom
             // A small horizon composition peeks above the existing northern ridge.
             BuildHorizonSilhouette(silhouette, root);
             CombineVisualMeshes(root);
+        }
+
+        public static void UpgradeTreeCanopies()
+        {
+            if (!NeedsTreeCanopyUpgrade()) return;
+            BuildTreeVisuals(Material("Rootwood detail", new Color(.16f, .095f, .065f)),
+                Material("Fern jade", new Color(.09f, .31f, .21f)), Material("Fern tips", new Color(.25f, .48f, .29f)));
+        }
+
+        public static bool NeedsTreeCanopyUpgrade()
+        {
+            foreach (var tree in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include))
+                if ((tree.name == "PineTree" || tree.name == "Low-poly pine") && (tree.position.z < 98 || tree.position.z >= 182) && !tree.Find("Wind swept canopy"))
+                    return true;
+            return false;
+        }
+
+        static void BuildTreeVisuals(Material rootBark, Material fernGreen, Material fernLight)
+        {
+            Random.InitState(49271);
+            foreach (var tree in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include))
+            {
+                if ((tree.name != "PineTree" && tree.name != "Low-poly pine") || tree.position.z >= 98 && tree.position.z < 182) continue;
+                if (!tree.Find("Wind swept canopy"))
+                {
+                    foreach (Transform child in tree)
+                        if (child.name == "Faceted crown") child.gameObject.SetActive(false);
+                    var canopy = new GameObject("Wind swept canopy").transform; canopy.SetParent(tree, false);
+                    canopy.gameObject.AddComponent<ForestWindSway>();
+                    for (int tier = 0; tier < 4; tier++)
+                        CreateNeedleCrown(canopy, 3.0f + tier * 1.12f, 2.45f - tier * .48f, 2.5f - tier * .18f, tier, tier % 2 == 0 ? fernGreen : fernLight);
+                    CombineVisualMeshes(canopy);
+                }
+                if (tree.Find("Root and branch detail")) continue;
+                var detail = new GameObject("Root and branch detail").transform; detail.SetParent(tree, false);
+                for (int i = 0; i < 4; i++)
+                {
+                    float a = i * Mathf.PI * .5f + Random.Range(-.18f, .18f);
+                    Vector3 end = new Vector3(Mathf.Cos(a) * Random.Range(1.15f, 1.7f), -.04f, Mathf.Sin(a) * Random.Range(1.15f, 1.7f));
+                    CreateTaperedSegment("Twisted exposed root", detail, new Vector3(0, .26f, 0), end, .26f, .055f, rootBark, 6);
+                }
+                for (int i = 0; i < 2; i++)
+                {
+                    float a = Random.Range(0f, Mathf.PI * 2f);
+                    Vector3 start = new Vector3(0, Random.Range(2.1f, 2.8f), 0);
+                    Vector3 end = start + new Vector3(Mathf.Cos(a) * 1.55f, .65f, Mathf.Sin(a) * 1.55f);
+                    CreateTaperedSegment("Gnarled pine bough", detail, start, end, .14f, .055f, rootBark, 5);
+                }
+                CombineVisualMeshes(detail);
+            }
         }
 
         static void BuildKeyObjectVisuals()
@@ -191,15 +757,25 @@ namespace LostKingdom
             }
             var floor = GameObject.Find("Forest entrance ground");
             if (floor && floor.TryGetComponent<Renderer>(out var floorRenderer)) floorRenderer.sharedMaterial.color = new Color(.09f, .19f, .14f);
-            var trail = GameObject.Find("Lantern trail");
-            if (trail && trail.TryGetComponent<Renderer>(out var trailRenderer)) trailRenderer.sharedMaterial.color = new Color(.31f, .34f, .29f);
+            var motes = new GameObject("Blue forest motes"); motes.transform.position = new Vector3(0, 3.5f, 80f);
+            var particles = motes.AddComponent<ParticleSystem>();
+            var main = particles.main; main.loop = true; main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(4f, 8f); main.startSpeed = new ParticleSystem.MinMaxCurve(.025f, .13f);
+            main.startSize = new ParticleSystem.MinMaxCurve(.025f, .075f); main.startColor = new Color(.39f, .72f, .83f, .48f); main.maxParticles = 180;
+            var emission = particles.emission; emission.rateOverTime = 16;
+            var shape = particles.shape; shape.shapeType = ParticleSystemShapeType.Box; shape.scale = new Vector3(86, 7, 166);
+            var particleRenderer = particles.GetComponent<ParticleSystemRenderer>();
+            var sparkMaterial = Resources.Load<Material>("LostKingdomSpark"); if (sparkMaterial) particleRenderer.sharedMaterial = sparkMaterial;
+            particleRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            particles.Play();
         }
 
         static void CreateFern(Vector3 position, float scale, Material material, Transform parent)
         {
             const int blades = 7, segments = 5;
             var vertices = new Vector3[blades * (segments + 1) * 2];
-            var triangles = new int[blades * segments * 6];
+            // Each blade segment writes two quads, with front and back faces (12 indices).
+            var triangles = new int[blades * segments * 12];
             int vi = 0, ti = 0;
             for (int b = 0; b < blades; b++)
             {
@@ -226,6 +802,38 @@ namespace LostKingdom
             var obj = new GameObject("Moonlit fern"); obj.transform.SetParent(parent, true); obj.transform.position = position; obj.transform.rotation = parent.rotation;
             obj.AddComponent<MeshFilter>().sharedMesh = mesh;
             var renderer = obj.AddComponent<MeshRenderer>(); renderer.sharedMaterial = material; renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        }
+
+        static void CreateNeedleCrown(Transform parent, float y, float radius, float height, int tier, Material material)
+        {
+            const int sides = 9;
+            var vertices = new Vector3[sides * 2 + 1];
+            var triangles = new int[sides * 6];
+            vertices[sides * 2] = new Vector3(0, height, 0);
+            for (int i = 0; i < sides; i++)
+            {
+                float a = i * Mathf.PI * 2f / sides + tier * .23f;
+                float r = radius * Random.Range(.84f, 1.12f);
+                vertices[i] = new Vector3(Mathf.Cos(a) * r, Random.Range(-.18f, .18f), Mathf.Sin(a) * r);
+                vertices[sides + i] = new Vector3(Mathf.Cos(a) * r * .5f, height * .48f, Mathf.Sin(a) * r * .5f);
+                int next = (i + 1) % sides, t = i * 6;
+                triangles[t] = i; triangles[t + 1] = next; triangles[t + 2] = sides + i;
+                triangles[t + 3] = next; triangles[t + 4] = sides + next; triangles[t + 5] = sides + i;
+            }
+            // Add the crown tip faces as a second band.
+            var expanded = new int[triangles.Length + sides * 3]; triangles.CopyTo(expanded, 0);
+            for (int i = 0; i < sides; i++)
+            {
+                int next = (i + 1) % sides, t = triangles.Length + i * 3;
+                expanded[t] = sides + i; expanded[t + 1] = sides + next; expanded[t + 2] = sides * 2;
+            }
+            var mesh = new Mesh { name = "Irregular evergreen bough mesh" };
+            mesh.vertices = vertices; mesh.triangles = expanded; mesh.RecalculateNormals(); mesh.RecalculateBounds();
+            var obj = new GameObject("Layered evergreen boughs", typeof(MeshFilter), typeof(MeshRenderer));
+            obj.transform.SetParent(parent, false); obj.transform.localPosition = new Vector3(0, y, 0);
+            obj.GetComponent<MeshFilter>().sharedMesh = mesh; obj.GetComponent<MeshRenderer>().sharedMaterial = material;
+            obj.GetComponent<MeshRenderer>().shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            obj.AddComponent<ForestWindSway>();
         }
 
         static void CreateMoonflower(Vector3 position, Material material, Transform parent)
@@ -372,8 +980,8 @@ namespace LostKingdom
             }
             foreach (var renderer in sources)
             {
-                var filter = renderer.GetComponent<MeshFilter>(); if (filter && filter.sharedMesh) Object.Destroy(filter.sharedMesh);
-                Object.Destroy(renderer.gameObject);
+                var filter = renderer.GetComponent<MeshFilter>(); if (filter && filter.sharedMesh) DestroyGenerated(filter.sharedMesh);
+                DestroyGenerated(renderer.gameObject);
             }
         }
 
@@ -390,6 +998,7 @@ namespace LostKingdom
                 CreateFloor("Shrine west shelf", new Vector3(-31, -1, 177), new Vector3(38, 2, 26), floorMaterial);
                 CreateFloor("Shrine east shelf", new Vector3(31, -1, 177), new Vector3(38, 2, 26), floorMaterial);
                 CreateFloor("Shrine north shelf", new Vector3(0, -1, 186), new Vector3(24, 2, 8), floorMaterial);
+                BuildWindingTrail();
             }
 
             foreach (var item in Object.FindObjectsByType<LightFragment>())
@@ -448,7 +1057,9 @@ namespace LostKingdom
                     float x = TrailX(z) + ((i % 2 == 0) ? -sideOffset : sideOffset);
                     if (section == 3) x = new[] { 4.0f, 7.5f, 8.0f, 5.0f, 1.6f }[i];
                     float top = heights[i];
-                    var rock = CreateRock("Ravine climbing ledge", new Vector3(x, top, z), section > 1 ? 2.7f : 3.1f, section > 1 ? 2.9f : 3.3f);
+                    float width = section == 2 ? 3.35f : section == 3 ? 3.3f : 3.15f;
+                    float depth = section == 2 ? 3.2f : 3.3f;
+                    var rock = CreateRock("Ravine climbing ledge", new Vector3(x, top, z), width, depth);
                     rock.transform.SetParent(route.transform, true);
                     if ((section == 0 && i == 1) || (section == 2 && i == 2) || (section == 3 && i == 3))
                         CreateMushroomSide(route.transform, x, top, z, i % 2 == 0 ? 1 : -1);
@@ -479,7 +1090,7 @@ namespace LostKingdom
             wisp.transform.SetParent(marker.transform, false); wisp.transform.localPosition = Vector3.up * .38f;
             wisp.transform.localScale = new Vector3(.24f, .44f, .24f);
             wisp.GetComponent<Renderer>().sharedMaterial = Material("Checkpoint glow", new Color(.25f, .86f, .69f), new Color(.08f, .48f, .31f));
-            Object.Destroy(wisp.GetComponent<Collider>());
+            DestroyGenerated(wisp.GetComponent<Collider>());
         }
 
 
@@ -494,11 +1105,11 @@ namespace LostKingdom
                 wall.GetComponent<Renderer>().sharedMaterial = stone;
             }
             float[] x = { .4f, -1.1f, 1.2f, -1.35f, 4.4f };
-            float[] z = { 165.4f, 168.0f, 170.6f, 173.2f, 179.0f };
-            float[] y = { 4.2f, 4.9f, 5.6f, 6.3f, 6.9f };
+            float[] z = { 165.4f, 168.4f, 171.4f, 174.4f, 179.0f };
+            float[] y = { 4.2f, 4.82f, 5.44f, 6.06f, 6.9f };
             for (int i = 0; i < z.Length; i++)
             {
-                var rock = CreateRock(i == 4 ? "Double jump cliff shelf" : "Shrine ascent ledge", new Vector3(x[i], y[i], z[i]), i == 4 ? 2.2f : 3.0f, i == 4 ? 2.3f : 2.9f);
+                var rock = CreateRock(i == 4 ? "Double jump cliff shelf" : "Shrine ascent ledge", new Vector3(x[i], y[i], z[i]), i == 4 ? 3.3f : 3.45f, i == 4 ? 3.3f : 2.7f);
                 rock.transform.SetParent(route, true);
                 if (i == 2) CreateMushroomSide(route, x[i], y[i], z[i], 1);
             }
@@ -508,55 +1119,131 @@ namespace LostKingdom
 
         static GameObject CreateRock(string name, Vector3 topCenter, float width, float depth)
         {
-            // Broad, flat octagonal landing face with a shallow bevel; collider uses the same stable mesh.
-            const int sides = 8;
-            var vertices = new Vector3[sides * 2 + 2];
-            var triangles = new int[sides * 12];
-            vertices[sides * 2] = Vector3.zero;
-            vertices[sides * 2 + 1] = new Vector3(0, -.9f, 0);
-            for (int i = 0; i < sides; i++)
-            {
-                float angle = Mathf.PI * 2f * i / sides + Mathf.PI / 8f;
-                float x = Mathf.Cos(angle), z = Mathf.Sin(angle);
-                vertices[i] = new Vector3(x * width * .48f, 0, z * depth * .48f);
-                vertices[sides + i] = new Vector3(x * width * .54f, -.9f, z * depth * .54f);
-            }
-            int ti = 0;
-            for (int i = 0; i < sides; i++)
-            {
-                int next = (i + 1) % sides;
-                triangles[ti++] = sides * 2; triangles[ti++] = i; triangles[ti++] = next;
-                triangles[ti++] = i; triangles[ti++] = sides + i; triangles[ti++] = next;
-                triangles[ti++] = next; triangles[ti++] = sides + i; triangles[ti++] = sides + next;
-                triangles[ti++] = sides * 2 + 1; triangles[ti++] = sides + next; triangles[ti++] = sides + i;
-            }
-            var mesh = new Mesh { name = name + " mesh", vertices = vertices, triangles = triangles }; mesh.RecalculateNormals(); mesh.RecalculateBounds();
-            var rock = new GameObject(name, typeof(MeshFilter), typeof(MeshRenderer), typeof(MeshCollider));
-            rock.transform.position = topCenter; rock.GetComponent<MeshFilter>().sharedMesh = mesh; rock.GetComponent<MeshRenderer>().sharedMaterial = stone; rock.GetComponent<MeshCollider>().sharedMesh = mesh;
-            var mossVertices = new Vector3[sides + 1]; var mossTriangles = new int[sides * 3];
-            mossVertices[sides] = Vector3.up * .012f;
-            for (int i = 0; i < sides; i++)
-            {
-                mossVertices[i] = vertices[i] * .86f + Vector3.up * .012f;
-                int next = (i + 1) % sides;
-                mossTriangles[i * 3] = sides; mossTriangles[i * 3 + 1] = i; mossTriangles[i * 3 + 2] = next;
-            }
-            var capMesh = new Mesh { name = "Flat moss landing surface mesh", vertices = mossVertices, triangles = mossTriangles };
-            capMesh.RecalculateNormals(); capMesh.RecalculateBounds();
+            // Rounded rectangular island: a broad, flat top tapers into a rocky underside.
+            var rock = new GameObject(name, typeof(MeshFilter), typeof(MeshRenderer), typeof(BoxCollider));
+            rock.transform.position = topCenter;
+            rock.GetComponent<MeshFilter>().sharedMesh = CreateFloatingIslandMesh(width, depth);
+            rock.GetComponent<MeshRenderer>().sharedMaterial = stone;
+            var landing = rock.GetComponent<BoxCollider>(); landing.size = new Vector3(width, .12f, depth); landing.center = new Vector3(0, -.06f, 0);
             var mossPatch = new GameObject("Flat moss landing surface", typeof(MeshFilter), typeof(MeshRenderer)); mossPatch.transform.SetParent(rock.transform, false);
-            mossPatch.GetComponent<MeshFilter>().sharedMesh = capMesh; mossPatch.GetComponent<MeshRenderer>().sharedMaterial = moss;
+            mossPatch.GetComponent<MeshFilter>().sharedMesh = CreateFloatingIslandTopMesh(width, depth);
+            mossPatch.GetComponent<MeshRenderer>().sharedMaterial = moss;
+            AddFloatingPlatformVisuals(rock.transform, new Vector2(width, depth));
             return rock;
         }
 
         static void CreateFloor(string name, Vector3 position, Vector3 size, Material material)
         {
             var floor = GameObject.CreatePrimitive(PrimitiveType.Cube); floor.name = name; floor.transform.position = position; floor.transform.localScale = size;
-            floor.GetComponent<Renderer>().sharedMaterial = material;
+            var floorRenderer = floor.GetComponent<Renderer>(); floorRenderer.sharedMaterial = material; floorRenderer.enabled = false;
+            CreateNaturalSurface(name + " natural surface", position, size, material);
+        }
+
+        static void CreateNaturalSurface(string name, Vector3 center, Vector3 size, Material baseMaterial)
+        {
+            int nx = Mathf.Max(2, Mathf.CeilToInt(size.x / 2.2f));
+            int nz = Mathf.Max(2, Mathf.CeilToInt(size.z / 2.2f));
+            var vertices = new Vector3[(nx + 1) * (nz + 1)];
+            var uv = new Vector2[vertices.Length];
+            var submesh = new List<int>[3] { new List<int>(), new List<int>(), new List<int>() };
+            float left = center.x - size.x * .5f, near = center.z - size.z * .5f;
+            float top = center.y + size.y * .5f + .012f;
+            for (int z = 0; z <= nz; z++)
+                for (int x = 0; x <= nx; x++)
+                {
+                    float wx = left + size.x * x / nx;
+                    float wz = near + size.z * z / nz;
+                    float pathDistance = Mathf.Abs(wx - TrailX(wz));
+                    float mask = Mathf.Clamp01((pathDistance - 5f) / 5f);
+                    float noise = Mathf.PerlinNoise(wx * .075f + 3.7f, wz * .075f + 11.2f);
+                    float broad = Mathf.PerlinNoise(wx * .023f + 19f, wz * .023f + 5f);
+                    float variation = (noise - .5f) * .045f + (broad - .5f) * .035f;
+                    int index = z * (nx + 1) + x;
+                    vertices[index] = new Vector3(wx, top + variation * mask, wz);
+                    uv[index] = new Vector2(wx * .18f, wz * .18f);
+                }
+            for (int z = 0; z < nz; z++)
+                for (int x = 0; x < nx; x++)
+                {
+                    int a = z * (nx + 1) + x, b = a + 1, c = a + nx + 1, d = c + 1;
+                    float wx = left + size.x * (x + .5f) / nx, wz = near + size.z * (z + .5f) / nz;
+                    float patch = Mathf.PerlinNoise(wx * .105f + 7f, wz * .105f + 2f);
+                    int layer = patch < .23f ? 1 : patch > .79f ? 2 : 0;
+                    submesh[layer].Add(a); submesh[layer].Add(c); submesh[layer].Add(b);
+                    submesh[layer].Add(b); submesh[layer].Add(c); submesh[layer].Add(d);
+                }
+            var mesh = new Mesh { name = name + " mesh", indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+            mesh.vertices = vertices; mesh.uv = uv; mesh.subMeshCount = 3;
+            for (int i = 0; i < 3; i++) mesh.SetTriangles(submesh[i], i);
+            mesh.RecalculateNormals(); mesh.RecalculateBounds();
+            var surface = new GameObject(name, typeof(MeshFilter), typeof(MeshRenderer));
+            surface.GetComponent<MeshFilter>().sharedMesh = mesh;
+            var renderer = surface.GetComponent<MeshRenderer>();
+            renderer.sharedMaterials = new[] { baseMaterial, forestSoil, forestLitter };
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        }
+
+        static void ApplyMottledTexture(Material material, Color tint, int seed)
+        {
+            const int resolution = 128;
+            var texture = new Texture2D(resolution, resolution, TextureFormat.RGB24, true) { name = material.name + " procedural grain", wrapMode = TextureWrapMode.Repeat, filterMode = FilterMode.Bilinear, anisoLevel = 4 };
+            var pixels = new Color[resolution * resolution];
+            for (int y = 0; y < resolution; y++)
+                for (int x = 0; x < resolution; x++)
+                {
+                    float u = x / (float)resolution, v = y / (float)resolution;
+                    float broad = Mathf.PerlinNoise(u * 5.5f + seed, v * 5.5f + seed * .37f);
+                    float grain = Mathf.PerlinNoise(u * 24f + seed * .13f, v * 24f + seed);
+                    float flecks = Mathf.PerlinNoise(u * 83f + seed, v * 83f + seed * .71f);
+                    float value = Mathf.Clamp01(.48f + (broad - .5f) * .66f + (grain - .5f) * .48f + (flecks - .5f) * .22f);
+                    pixels[y * resolution + x] = tint * Mathf.Lerp(.58f, 1.42f, value);
+                }
+            texture.SetPixels(pixels); texture.Apply(true, true);
+            if (material.HasProperty("_BaseMap")) material.SetTexture("_BaseMap", texture);
+            else if (material.HasProperty("_MainTex")) material.SetTexture("_MainTex", texture);
+            material.color = Color.white;
+            if (material.HasProperty("_Smoothness")) material.SetFloat("_Smoothness", .16f);
+            if (material.HasProperty("_Glossiness")) material.SetFloat("_Glossiness", .16f);
+        }
+
+        static void BuildWindingTrail()
+        {
+            // The continuous entrance floor is the only collider for this walking area.
+            foreach (var renderer in Object.FindObjectsByType<Renderer>())
+                if (renderer.gameObject.name == "Lantern trail")
+                {
+                    renderer.enabled = false;
+                    foreach (var collider in renderer.GetComponents<Collider>()) collider.enabled = false;
+                }
+            // End the trail before the ravine so this visual surface cannot suggest a shortcut over the gap.
+            const int segments = 90;
+            var vertices = new Vector3[(segments + 1) * 2];
+            var uv = new Vector2[vertices.Length];
+            var triangles = new int[segments * 6];
+            for (int i = 0; i <= segments; i++)
+            {
+                float z = i * (97f / segments);
+                float center = TrailX(z) + (Mathf.PerlinNoise(z * .035f, 31f) - .5f) * .9f;
+                float halfWidth = 3.15f + Mathf.PerlinNoise(z * .09f, 17f) * .85f;
+                int index = i * 2;
+                vertices[index] = new Vector3(center - halfWidth, .012f, z);
+                vertices[index + 1] = new Vector3(center + halfWidth, .012f, z);
+                uv[index] = new Vector2(0, z * .22f); uv[index + 1] = new Vector2(1, z * .22f);
+                if (i == segments) continue;
+                int t = i * 6;
+                triangles[t] = index; triangles[t + 1] = index + 2; triangles[t + 2] = index + 1;
+                triangles[t + 3] = index + 1; triangles[t + 4] = index + 2; triangles[t + 5] = index + 3;
+            }
+            var mesh = new Mesh { name = "Winding forest path mesh" };
+            mesh.vertices = vertices; mesh.uv = uv; mesh.triangles = triangles; mesh.RecalculateNormals(); mesh.RecalculateBounds();
+            var path = new GameObject("Continuous winding forest path", typeof(MeshFilter), typeof(MeshRenderer));
+            path.GetComponent<MeshFilter>().sharedMesh = mesh; path.GetComponent<MeshRenderer>().sharedMaterial = wornTrail;
+            path.GetComponent<MeshRenderer>().shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         }
         static void AddCliffMass(Vector3 position, Vector3 size)
         {
             var mass = GameObject.CreatePrimitive(PrimitiveType.Sphere); mass.name = "Ravine rock face"; mass.transform.position = position; mass.transform.localScale = size;
-            mass.GetComponent<Renderer>().sharedMaterial = stone; Object.Destroy(mass.GetComponent<Collider>());
+            mass.GetComponent<Renderer>().sharedMaterial = stone; DestroyGenerated(mass.GetComponent<Collider>());
         }
         static void PlaceFragment(LightFragment fragment, float x, float top, float z)
         {
@@ -636,6 +1323,8 @@ namespace LostKingdom
         static void BuildFloorDetails()
         {
             Random.InitState(714);
+            var leaf = Material("Copper forest leaves", new Color(.28f, .19f, .105f));
+            var stoneDust = Material("Weathered path stones", new Color(.24f, .28f, .27f));
             for (int i = 0; i < 220; i++)
             {
                 float z = Random.Range(3f, 183f), x = Random.Range(-44f, 44f);
@@ -648,8 +1337,23 @@ namespace LostKingdom
                     leafObj.transform.SetParent(fern.transform, false); leafObj.transform.localPosition = new Vector3(0, .23f, 0);
                     leafObj.transform.localScale = new Vector3(.12f, Random.Range(.35f, .62f), .08f);
                     leafObj.transform.localRotation = Quaternion.Euler(Random.Range(-24f, 18f), blade * 90f, Random.Range(-18f, 18f));
-                    leafObj.GetComponent<Renderer>().sharedMaterial = moss; Object.Destroy(leafObj.GetComponent<Collider>());
+                    leafObj.GetComponent<Renderer>().sharedMaterial = moss; DestroyGenerated(leafObj.GetComponent<Collider>());
                 }
+            }
+            // Scatter a restrained mix of leaf litter and embedded stones away from the walkable trail.
+            for (int i = 0; i < 520; i++)
+            {
+                float z = Random.Range(2f, 184f), x = Random.Range(-46f, 46f);
+                if ((z >= 98 && z < 182) || Mathf.Abs(x - TrailX(z)) < 5.4f) continue;
+                bool pebble = i % 4 == 0;
+                var detail = GameObject.CreatePrimitive(pebble ? PrimitiveType.Sphere : PrimitiveType.Cube);
+                detail.name = pebble ? "Mossy forest pebble" : "Fallen copper leaf";
+                detail.transform.position = new Vector3(x, pebble ? .035f : .018f, z);
+                detail.transform.rotation = Quaternion.Euler(pebble ? Random.Range(-12f, 12f) : Random.Range(0f, 18f), Random.Range(0f, 360f), pebble ? 0 : Random.Range(-18f, 18f));
+                float size = Random.Range(.12f, .4f);
+                detail.transform.localScale = pebble ? new Vector3(size * 1.7f, size * .55f, size) : new Vector3(size * 1.8f, .035f, size * .65f);
+                detail.GetComponent<Renderer>().sharedMaterial = pebble ? stoneDust : leaf;
+                DestroyGenerated(detail.GetComponent<Collider>());
             }
         }
 
@@ -659,7 +1363,7 @@ namespace LostKingdom
             CreatePoisonCluster(new Vector3(24, 0, 69));
         }
 
-        static void CreatePoisonCluster(Vector3 position)
+        static GameObject CreatePoisonCluster(Vector3 position)
         {
             var cluster = new GameObject("Glowing poisonous mushroom cluster"); cluster.transform.position = position;
             var trigger = cluster.AddComponent<SphereCollider>(); trigger.isTrigger = true; trigger.center = Vector3.up * .47f; trigger.radius = .82f;
@@ -672,12 +1376,13 @@ namespace LostKingdom
                 var stem = GameObject.CreatePrimitive(PrimitiveType.Cylinder); stem.name = "Pale mushroom stem";
                 stem.transform.SetParent(cluster.transform, false); stem.transform.localPosition = new Vector3(offsets[i], height * .42f, i == 1 ? .08f : -.12f);
                 stem.transform.localScale = new Vector3(.12f, height * .42f, .12f); stem.GetComponent<Renderer>().sharedMaterial = skin;
-                Object.Destroy(stem.GetComponent<Collider>());
-                var cap = GameObject.CreatePrimitive(PrimitiveType.Sphere); cap.name = "Violet glowing cap";
+                DestroyGenerated(stem.GetComponent<Collider>());
+                var cap = GameObject.CreatePrimitive(PrimitiveType.Sphere); cap.name = "Pink glowing poison cap";
                 cap.transform.SetParent(cluster.transform, false); cap.transform.localPosition = new Vector3(offsets[i], height, i == 1 ? .08f : -.12f);
                 cap.transform.localScale = i == 1 ? new Vector3(.56f, .25f, .52f) : new Vector3(.42f, .2f, .4f);
-                cap.GetComponent<Renderer>().sharedMaterial = poison; Object.Destroy(cap.GetComponent<Collider>());
+                cap.GetComponent<Renderer>().sharedMaterial = poison; DestroyGenerated(cap.GetComponent<Collider>());
             }
+            return cluster;
         }
 
         public static void PoisonEffect(Transform player)
@@ -685,18 +1390,27 @@ namespace LostKingdom
             if (!player) return;
             var effect = new GameObject("Poison spore burst"); effect.transform.SetParent(player, false); effect.transform.localPosition = Vector3.up * .9f;
             var particles = effect.AddComponent<ParticleSystem>();
-            var main = particles.main; main.loop = false; main.duration = .35f; main.startLifetime = .7f; main.startSpeed = 1.2f; main.startSize = .12f; main.startColor = new Color(.75f, .24f, 1f, .85f);
+            var main = particles.main; main.loop = false; main.duration = .35f; main.startLifetime = .7f; main.startSpeed = 1.2f; main.startSize = .12f; main.startColor = new Color(1f, .12f, .5f, .85f);
             var emission = particles.emission; emission.rateOverTime = 0; emission.SetBursts(new[] { new ParticleSystem.Burst(0, 18) });
             var shape = particles.shape; shape.shapeType = ParticleSystemShapeType.Sphere; shape.radius = .35f;
             var material = Resources.Load<Material>("LostKingdomSpark"); if (material) particles.GetComponent<ParticleSystemRenderer>().sharedMaterial = material;
-            particles.Play(); Object.Destroy(effect, 1.5f);
+            particles.Play(); DestroyGenerated(effect, 1.5f);
         }
 
         static void Add(Transform parent, string name, PrimitiveType type, Vector3 pos, Vector3 scale, Material material)
         {
             var obj = GameObject.CreatePrimitive(type); obj.name = name; obj.transform.SetParent(parent, false);
             obj.transform.localPosition = pos; obj.transform.localScale = scale; obj.layer = 2;
-            obj.GetComponent<Renderer>().sharedMaterial = material; Object.Destroy(obj.GetComponent<Collider>());
+            obj.GetComponent<Renderer>().sharedMaterial = material; DestroyGenerated(obj.GetComponent<Collider>());
+        }
+        static void DestroyGenerated(Object target, float delay = 0)
+        {
+            if (!target) return;
+            if (Application.isPlaying)
+            {
+                if (delay > 0) Object.Destroy(target, delay); else Object.Destroy(target);
+            }
+            else Object.DestroyImmediate(target);
         }
         static Material Material(string name, Color color, Color? emission = null)
         {
@@ -714,18 +1428,27 @@ namespace LostKingdom
 
 namespace LostKingdom
 {
+    public sealed class ForestWindSway : MonoBehaviour
+    {
+        float phase;
+        void Awake() { phase = Random.value * Mathf.PI * 2f; }
+        void Update()
+        {
+            float time = Time.time * .68f + phase;
+            transform.localRotation = Quaternion.Euler(Mathf.Sin(time) * 1.7f, 0, Mathf.Cos(time * .83f) * 2.1f);
+        }
+    }
+
     [RequireComponent(typeof(Collider))]
     [RequireComponent(typeof(Collider))]
     public class PoisonMushroom : MonoBehaviour
     {
-        bool consumed;
         static readonly int EmissionColor = Shader.PropertyToID("_EmissionColor");
         void OnTriggerEnter(Collider other)
         {
-            if (consumed || !GameManager.Instance) return;
+            if (!GameManager.Instance || !GameManager.Instance.IsPlaying) return;
             var player = other.GetComponentInParent<PlayerMovement>();
             if (!player) return;
-            consumed = true;
             GameManager.Instance.AddPoison(player.transform);
             StartCoroutine(GlowBurst());
         }
@@ -735,14 +1458,51 @@ namespace LostKingdom
             var block = new MaterialPropertyBlock();
             for (float t = 0; t < .42f; t += Time.deltaTime)
             {
-                float strength = Mathf.Lerp(4f, 1.2f, t / .42f);
+                float strength = Mathf.Lerp(3.5f, 1.1f, t / .42f);
                 foreach (var renderer in renderers)
                 {
-                    renderer.GetPropertyBlock(block); block.SetColor(EmissionColor, new Color(.55f, .15f, 1f) * strength); renderer.SetPropertyBlock(block);
+                    renderer.GetPropertyBlock(block); block.SetColor(EmissionColor, new Color(1f, .08f, .42f) * strength); renderer.SetPropertyBlock(block);
                 }
                 yield return null;
             }
             foreach (var renderer in renderers) renderer.SetPropertyBlock(null);
+        }
+    }
+
+    // Keeps the forest's eerie drone loud in the ravine and soft near its crystal sanctuary.
+    public sealed class MysticForestAmbienceDistance : MonoBehaviour
+    {
+        AudioSource source;
+        Transform crystal;
+        float currentVolume;
+        const float QuietVolume = .035f;
+        const float LoudVolume = .52f;
+        const float DistanceForFullVolume = 75f;
+
+        void Awake()
+        {
+            source = GetComponent<AudioSource>();
+            currentVolume = LoudVolume;
+        }
+
+        void Update()
+        {
+            if (!crystal)
+            {
+                var crystalObject = GameObject.Find("Crystal of Light");
+                if (!crystalObject) crystalObject = GameObject.Find("Crystal dais");
+                if (crystalObject) crystal = crystalObject.transform;
+            }
+            var player = FindAnyObjectByType<PlayerMovement>();
+            float target = LoudVolume;
+            if (player && crystal)
+            {
+                float distance = Vector3.Distance(player.transform.position, crystal.position);
+                float away = Mathf.Clamp01(distance / DistanceForFullVolume);
+                target = Mathf.Lerp(QuietVolume, LoudVolume, away * away);
+            }
+            currentVolume = Mathf.MoveTowards(currentVolume, target, Time.deltaTime * .2f);
+            if (source) source.volume = currentVolume;
         }
     }
 }

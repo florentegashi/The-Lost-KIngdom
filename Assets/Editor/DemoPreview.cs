@@ -11,6 +11,9 @@ namespace LostKingdom.Editor
         public static void Capture()
         {
             EditorSceneManager.OpenScene("Assets/Scenes/MysticForest.unity");
+            MysticForestSceneBaker.PrepareRuntimeMaterialCopies();
+            LostKingdom.ForestLevelUpgrade.Build();
+            LostKingdom.ForestLevelUpgrade.UpgradeTreeCanopies();
             var camera = Camera.main;
             Vector3 pivot = new Vector3(0, 1.6f, 0);
             camera.transform.position = pivot + Quaternion.Euler(22, 0, 0) * Vector3.back * 6;

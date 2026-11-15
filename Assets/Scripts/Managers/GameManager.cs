@@ -23,6 +23,7 @@ namespace LostKingdom
         void Start()
         {
             ForestLevelUpgrade.Build();
+            ForestLevelUpgrade.FixWalkingColliders();
             var player = FindAnyObjectByType<PlayerMovement>();
             if (player) { checkpointPosition = player.transform.position; hasCheckpoint = true; }
             ui.crystalText.text = "Crystal of Light: 0/1";

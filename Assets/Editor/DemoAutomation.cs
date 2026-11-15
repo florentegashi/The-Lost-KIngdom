@@ -19,6 +19,8 @@ namespace LostKingdom.Editor
             {
                 if (command == "generate") LostKingdomSetup.Generate();
                 else if (command == "verify") Verify();
+                else if (command == "bake-mystic-forest") MysticForestSceneBaker.Bake();
+                else if (command == "bake-mystic-forest-road") MysticForestSceneBaker.BakeRoadSurface();
                 File.WriteAllText("Logs/DemoCommandResult.txt", "OK: " + command);
             }
             catch (System.Exception error) { Debug.LogException(error); File.WriteAllText("Logs/DemoCommandResult.txt", error.ToString()); }
